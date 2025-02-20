@@ -1,43 +1,74 @@
-# go-nude
-
-Nudity detection with Go.
-
-(Go porting from https://github.com/pa7/nude.js)
-
-## Example
-
-```go
 package main
 
 import (
-	"fmt"
-	"log"
-    "github.com/koyachi/go-nude"
+    "bytes"
+    "context"
+    "fmt"
+    "image"
+    "image/jpeg"
+    "os"
+
+    "github.com/beezrathashem/kosher-fill/nude"
+    "github.com/google/uuid"
+    "github.com/aws/aws-sdk-go-v2/aws"
+    "github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-func main() {
-	imagePath := "images/test2.jpg"
+// Process the image and censor it before uploading to S3
+func CensorAndUploadImage(img image.Image, filterType string) (string, error) {
+    // Apply the specified filter
+    filtered, err := ApplyFilter(img, filterType)
+    if err != nil {
+        return "", fmt.Errorf("failed to apply filter: %w", err)
+    }
 
-	isNude, err := nude.IsNude(imagePath)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("isNude = %v\n", isNude)
+    // Convert to JPEG
+    var buf bytes.Buffer
+    if err := jpeg.Encode(&buf, filtered, &jpeg.Options{Quality: 85}); err != nil {
+        return "", fmt.Errorf("failed to encode image: %w", err)
+    }
+
+    // Upload to storage
+    url, err := UploadToStorage(buf.Bytes())
+    if err != nil {
+        return "", fmt.Errorf("failed to upload image: %w", err)
+    }
+
+    return url, nil
 }
 
-```
+// Apply the filter to the image based on the chosen filter type
+func ApplyFilter(img image.Image, filterType string) (image.Image, error) {
+    detector := nude.NewDetector(img)
+    _, err := detector.Parse()
+    if err != nil {
+        return nil, fmt.Errorf("error parsing image: %w", err)
+    }
 
-## Other implementations
+    switch filterType {
+    case "fill":
+        return detector.FillSkinPixels(detector.SkinRegions)
+    default:
+        return detector.DrawImageAndRegions(detector.SkinRegions)
+    }
+}
 
-- [nude.js](http://www.patrick-wied.at/static/nudejs/)
-- [nude.rb](https://github.com/mitukiii/nude.rb)
-- [nude.py](https://github.com/hhatto/nude.py)
+// Upload the censored image to S3
+func UploadToStorage(imgBytes []byte) (string, error) {
+    key := fmt.Sprintf("censored/%s.jpg", uuid.New().String())
 
+    // Upload to S3
+    _, err := s3Client.PutObject(context.Background(), &s3.PutObjectInput{
+        Bucket:      aws.String(os.Getenv("AWS_BUCKET")),
+        Key:         aws.String(key),
+        Body:        bytes.NewReader(imgBytes),
+        ContentType: aws.String("image/jpeg"),
+    })
 
-## Contributing
+    if err != nil {
+        return "", fmt.Errorf("failed to upload to S3: %w", err)
+    }
 
-1. Fork it
-2. Create your feature branch (`git checkout -b my-new-feature`)
-3. Commit your changes (`git commit -am 'Add some feature'`)
-4. Push to the branch (`git push origin my-new-feature`)
-5. Create new Pull Request
+    // Return the URL
+    return fmt.Sprintf("https://%s.s3.amazonaws.com/%s", os.Getenv("AWS_BUCKET"), key), nil
+}
